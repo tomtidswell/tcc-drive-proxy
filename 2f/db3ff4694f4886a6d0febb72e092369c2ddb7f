@@ -1,0 +1,26 @@
+pnpm-lock.yaml
+  s_2592a157e9684a::t_022d2b61daf9b1 1-869
+wrangler.jsonc
+  s_2592a157e9684a::t_b8d657baab272e 7
+src/index.js
+  s_2592a157e9684a::t_d3aa87dc0b84f0 1-11,17-20,73-75,80,85-89,98-101,142-146,150-157,160,175-187,190,197,199
+README.md
+  s_2592a157e9684a::t_d175ca33755cc0 67-69,79-81
+  s_2592a157e9684a::t_e0e0f36fd4fea3 9-10
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "2fdb3ff4694f4886a6d0febb72e092369c2ddb7f",
+  "prompts": {},
+  "sessions": {
+    "s_2592a157e9684a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "33957e06-8ffd-47f3-a1d6-db2c86e7b70c",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Tom Tidswell <tomtidswell@gmail.com>"
+    }
+  }
+}
