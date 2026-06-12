@@ -1,0 +1,14 @@
+{
+    "name": "tcc-drive-proxy",
+    "version": "1.0.0",
+    "private": true,
+    "description": "Cloudflare Worker proxying audio from Google Drive for TCC Repertoire",
+    "scripts": {
+        "deploy": "wrangler deploy",
+        "dev": "wrangler dev",
+        "start": "wrangler dev"
+    },
+    "devDependencies": {
+        "wrangler": "^4.95.0"
+    }
+}
