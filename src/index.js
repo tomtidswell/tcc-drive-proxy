@@ -1,15 +1,22 @@
-const corsHeadersFor = (origin) => ({
-  "Access-Control-Allow-Origin": origin || "null",
-  "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-  "Access-Control-Allow-Headers": "Range",
-  "Access-Control-Expose-Headers":
-    "Content-Length, Content-Range, Accept-Ranges",
-  Vary: "Origin",
-})
+const corsHeadersFor = (origin) => {
+  const headers = {
+    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+    "Access-Control-Allow-Headers": "Range",
+    "Access-Control-Expose-Headers":
+      "Content-Length, Content-Range, Accept-Ranges",
+    Vary: "Origin",
+  }
+  if (origin) headers["Access-Control-Allow-Origin"] = origin
+  return headers
+}
 
 // Audio files are immutable: a given Drive id always returns the same bytes,
 // and a new recording is uploaded as a new id. So cache hard at both layers.
 const CACHE_CONTROL = "public, max-age=31536000, immutable"
+
+// The full file is buffered in memory once per cache miss, and the Worker
+// isolate has a 128 MB limit, so refuse anything that could get close.
+const MAX_FILE_BYTES = 100 * 1024 * 1024
 
 const errorResponse = (message, status, origin) =>
   new Response(message, {
@@ -61,43 +68,23 @@ const resolveOrigin = (request, allowed) => {
   return null
 }
 
-// Parse a single "bytes=start-end" range against a known total size.
-// Returns null when no Range header, "invalid" when unsatisfiable, or
-// { start, end } (inclusive) otherwise.
-const parseRange = (header, size) => {
-  if (!header) return null
-  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim())
-  if (!match) return "invalid"
-  const [, startRaw, endRaw] = match
-  if (startRaw === "" && endRaw === "") return "invalid"
-
-  let start
-  let end
-  if (startRaw === "") {
-    // Suffix range: the final N bytes.
-    const suffix = Number(endRaw)
-    if (suffix === 0) return "invalid"
-    start = Math.max(size - suffix, 0)
-    end = size - 1
-  } else {
-    start = Number(startRaw)
-    end = endRaw === "" ? size - 1 : Number(endRaw)
-  }
-
-  if (start > end || start >= size) return "invalid"
-  if (end >= size) end = size - 1
-  return { start, end }
-}
-
 // Fetch the whole file from Drive and wrap it in a clean, cacheable 200.
 // CORS is intentionally NOT stored, so a single cache entry is shared across
-// every allowed origin; it is added per-response instead.
+// every allowed origin; it is added per-response instead. Content-Length is
+// always set because the edge cache only serves Range requests (206) for
+// entries that carry it.
 const fetchFullFromDrive = async (fileId) => {
   const driveUrl = `https://drive.google.com/uc?id=${encodeURIComponent(fileId)}&export=download`
 
   const upstream = await fetch(driveUrl, { redirect: "follow" })
+  if (upstream.status === 404) return { error: "File not found", status: 404 }
   if (!upstream.ok) {
     return { error: `Upstream returned ${upstream.status}`, status: 502 }
+  }
+
+  const declaredLength = Number(upstream.headers.get("content-length"))
+  if (declaredLength > MAX_FILE_BYTES) {
+    return { error: "File too large to proxy", status: 502 }
   }
 
   const contentType = upstream.headers.get("content-type") || "audio/mpeg"
@@ -108,6 +95,10 @@ const fetchFullFromDrive = async (fileId) => {
   }
 
   const body = await upstream.arrayBuffer()
+  if (body.byteLength > MAX_FILE_BYTES) {
+    return { error: "File too large to proxy", status: 502 }
+  }
+
   const headers = new Headers()
   headers.set("Content-Type", contentType)
   headers.set("Cache-Control", CACHE_CONTROL)
@@ -148,17 +139,25 @@ export default {
     const fileId = url.searchParams.get("id")
     if (!fileId) return errorResponse("Missing file ID", 400, origin)
 
-    // Edge-cache key: normalised to just the file id and the GET method, with
-    // no Range or Origin, so every request for a file shares one cached copy.
+    // Edge-cache key: normalised to just the file id, with no Origin, so every
+    // request for a file shares one cached full copy. The client's Range
+    // header is forwarded on the match: the Cache API serves 206 slices
+    // natively from stored entries that have a Content-Length, so the Worker
+    // never parses ranges or buffers the file to slice it.
     const cache = caches.default
     const cacheKeyUrl = new URL(request.url)
     cacheKeyUrl.search = `?id=${encodeURIComponent(fileId)}`
-    const cacheKey = new Request(cacheKeyUrl.toString(), { method: "GET" })
+    const matchHeaders = new Headers()
+    const rangeHeader = request.headers.get("Range")
+    if (rangeHeader) matchHeaders.set("Range", rangeHeader)
+    const matchKey = new Request(cacheKeyUrl.toString(), {
+      headers: matchHeaders,
+    })
 
-    let fullResponse = await cache.match(cacheKey)
+    let response = await cache.match(matchKey)
     let cacheStatus = "HIT"
 
-    if (!fullResponse) {
+    if (!response) {
       cacheStatus = "MISS"
       let result
       try {
@@ -173,43 +172,30 @@ export default {
       if (result.error)
         return errorResponse(result.error, result.status, origin)
 
-      fullResponse = result.response
-      // Populate the edge cache without blocking this response.
-      ctx.waitUntil(cache.put(cacheKey, fullResponse.clone()))
+      // Store first, then re-match, so a miss gets the same native Range
+      // handling as a hit.
+      try {
+        await cache.put(
+          new Request(cacheKeyUrl.toString()),
+          result.response.clone(),
+        )
+        response = await cache.match(matchKey)
+      } catch {
+        // cache unavailable or entry rejected; fall through
+      }
+      // Fall back to the full file, ignoring Range (RFC 9110 permits this).
+      if (!response) response = result.response
     }
 
-    // fullResponse is always a complete 200 with the whole file. Serve a slice
-    // if the client asked for a range, otherwise the whole thing.
-    const totalLength = Number(fullResponse.headers.get("Content-Length"))
-    const range = Number.isFinite(totalLength)
-      ? parseRange(request.headers.get("Range"), totalLength)
-      : null
-
-    const headers = new Headers(fullResponse.headers)
+    const headers = new Headers(response.headers)
     for (const [key, value] of Object.entries(corsHeadersFor(origin))) {
       headers.set(key, value)
     }
     headers.set("X-Cache", cacheStatus)
 
-    if (range === "invalid") {
-      headers.set("Content-Range", `bytes */${totalLength}`)
-      return new Response(null, { status: 416, headers })
-    }
-
-    if (range) {
-      const { start, end } = range
-      headers.set("Content-Range", `bytes ${start}-${end}/${totalLength}`)
-      headers.set("Content-Length", String(end - start + 1))
-      if (request.method === "HEAD") {
-        return new Response(null, { status: 206, headers })
-      }
-      const body = await fullResponse.arrayBuffer()
-      return new Response(body.slice(start, end + 1), { status: 206, headers })
-    }
-
     if (request.method === "HEAD") {
-      return new Response(null, { status: 200, headers })
+      return new Response(null, { status: response.status, headers })
     }
-    return new Response(fullResponse.body, { status: 200, headers })
+    return new Response(response.body, { status: response.status, headers })
   },
 }

@@ -4,12 +4,12 @@
   "workers_dev": true,
   "preview_urls": true,
   "compatibility_date": "2026-05-20",
-  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "compatibility_flags": ["global_fetch_strictly_public"],
   // Comma-separated list of origins the Worker will serve.
   // Supports exact origins (https://example.com) and one wildcard prefix per entry (*.example.com).
   // Update with your Pages domain after the first deploy.
   "vars": {
-    "ALLOWED_ORIGINS": "http://localhost:3000,https://tcc-player.tomtidswell.workers.dev",
+    "ALLOWED_ORIGINS": "http://localhost:3000,https://tcc-player.tomtidswell.workers.dev,https://tcc-player.tottenhamcommunitychoir.org",
   },
   "observability": {
     "enabled": true,
